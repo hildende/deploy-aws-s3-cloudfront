@@ -55,6 +55,10 @@ This option is typically used to reduce [invalidation costs](https://docs.aws.am
 
 If depending on a named profile in `~/.aws/credentials` for authentication, use this option to provide the profile name.
 
+#### `--remove-trailingslash`
+
+Upload objects without trailing slash and adds redirect from trailing slash URL for S3 websites.
+
 #### `--non-interactive`
 
 Never prompt for confirmation. This is particularly useful for automated deployment pipelines.

@@ -64,6 +64,11 @@ const argv = yargs
     describe: 'Do not prompt for confirmation',
     default: false,
   })
+  .option('remove-trailingslash', {
+    type: 'boolean',
+    describe: 'Remove trailing slash from urls',
+    default: false,
+  })
   .argv;
 
 if (!path.isAbsolute(argv.source)) {
@@ -102,16 +107,16 @@ fetch()
     changes(fetched)
       .then((changed) => {
 
-        if (!changed.added.length && !changed.modified.length && !changed.deleted.length) {
+        if (!changed.added.length && !changed.modified.length && !changed.deleted.length && !changed.redirects.length) {
           console.log(colors.info('No changes detected'));
           process.exit();
         }
 
         const proceed = function() {
-          deploy(changed.added.concat(changed.modified), changed.deleted)
+          deploy(changed.added.concat(changed.modified), changed.redirects, changed.deleted)
             .then((deployed) => {
 
-              invalidate(deployed.uploaded.concat(deployed.deleted))
+              invalidate(deployed.uploaded.concat(deployed.deleted).concat(deployed.redirected))
                 .then((invalidated) => {
 
                   console.log(colors.info('Deployment complete'));
@@ -252,23 +257,35 @@ function changes(fetched) {
       added: [],
       modified: [],
       deleted: [],
+      redirects: [],
     };
+
+    let keepRedirects = [];
 
     console.log(colors.debug('Checking for modifications...'));
 
     Object.keys(fetched.local).forEach((key) => {
-      if (!fetched.remote.hasOwnProperty(key)) {
+      if (!fetched.remote.hasOwnProperty(targetKey(key))) {
         results.added.push(key);
-        console.log(colors.green.bold('A ') + key);
-      } else if (fetched.local[key] !== fetched.remote[key]) {
+        let as = '';
+        if(argv.removeTrailingslash && key !== targetKey(key)) {
+            as = ' as ' + targetKey(key);
+            results.redirects[key] = targetKey(key);
+        }
+        console.log(colors.green.bold('A ') + key + as);
+      } else if (fetched.local[key] !== fetched.remote[targetKey(key)]) {
         results.modified.push(key);
+        keepRedirects.push(key);
         console.log(colors.yellow.bold('M ') + key);
+      } else if (key !== targetKey(key)) {
+        keepRedirects.push(key);
       }
     });
 
     if (argv.delete) {
+      const localTargetKeys = Object.keys(fetched.local).map(targetKey);
       Object.keys(fetched.remote).forEach((key) => {
-        if (!fetched.local.hasOwnProperty(key)) {
+        if(!localTargetKeys.includes(key) && !results.redirects.hasOwnProperty(key) && !keepRedirects.includes(key)) {
           results.deleted.push(key);
           console.log(colors.red.bold('D ') + key);
         }
@@ -280,7 +297,7 @@ function changes(fetched) {
   });
 }
 
-function deploy(uploads, deletes) {
+function deploy(uploads, redirects, deletes) {
   return new Promise((resolve, reject) => {
 
     function uploadObjects() {
@@ -311,7 +328,7 @@ function deploy(uploads, deletes) {
 
             let params = Object.assign({
               Body: stream,
-              Key: argv.destination + key,
+              Key: targetKey(argv.destination + key),
               ContentType: mimeTypes.lookup(file) || 'application/octet-stream',
               ContentLength: stats.size,
             }, defaults);
@@ -334,6 +351,47 @@ function deploy(uploads, deletes) {
           reject(error);
         }
 
+      });
+    }
+
+    function uploadRedirectObjects() {
+      return new Promise((resolve, reject) => {
+        const redirected = [];
+
+        const defaults = {
+          Bucket: argv.bucket,
+          ACL: 'public-read',
+        };
+
+        try {
+          if (!Object.keys(redirects).length) {
+            resolve(redirected);
+          }
+
+          Object.keys(redirects).forEach((key) => {
+            let params = Object.assign({
+              Key: key,
+              WebsiteRedirectLocation: redirects[key].startsWith("/") ? redirects[key] : "/" + redirects[key]
+            }, defaults);
+
+            console.log(colors.info('Creating redirect from ' + colors.bold(params.Key) + ' to ' + colors.bold(params.WebsiteRedirectLocation) + '...'));
+
+            s3.putObject(params, function (err, data) {
+              if (err) {
+                throw err;
+              }
+
+              redirected.push(params.Key);
+
+              if (redirected.length === Object.keys(redirects).length) {
+                resolve(redirected);
+              }
+            });
+          });
+
+        } catch (error) {
+          reject(error);
+        }
       });
     }
 
@@ -381,17 +439,21 @@ function deploy(uploads, deletes) {
     uploadObjects()
       .then((uploaded) => {
 
-        deleteObjects()
-          .then((deleted) => {
+        uploadRedirectObjects()
+          .then((redirected) => {
+            deleteObjects()
+              .then((deleted) => {
 
-            resolve({
-              uploaded,
-              deleted,
-            });
+                resolve({
+                  uploaded,
+                  redirected,
+                  deleted,
+                });
 
-          })
-          .catch((err) => {
-            reject(err);
+              })
+              .catch((err) => {
+                reject(err);
+              });
           });
 
       })
@@ -460,3 +522,10 @@ function handleError(err, message) {
   console.error(colors.red(colors.bold('ERROR ') + message || err.message));
   process.exit(1);
 }
+const targetKey = (path) => {
+    if (path !== "index.html" && path.endsWith("/index.html") && argv.removeTrailingslash) {
+        return path.replace("/index.html", "");
+    } else {
+        return path
+    }
+};
